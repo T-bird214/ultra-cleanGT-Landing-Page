@@ -1,0 +1,14 @@
+# Seguridad
+.env
+.env.local
+.env.*.local
+
+# Dependencias (Node/Next.js)
+node_modules/
+dist/
+.next/
+
+# Logs y Archivos del Sistema
+npm-debug.log*
+.DS_Store
+.directory
