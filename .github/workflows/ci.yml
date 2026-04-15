@@ -1,0 +1,140 @@
+name: CI — Quality Gate
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+
+  # ── 1. Lint + TypeScript ──────────────────────────────────
+  lint:
+    name: 🔍 Lint & TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run type-check
+
+  # ── 2. Tests ──────────────────────────────────────────────
+  test:
+    name: 🧪 Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run test:ci
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://test.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: test-anon-key
+          SUPABASE_SERVICE_ROLE_KEY: test-service-key
+          HUBSPOT_ACCESS_TOKEN: test-token
+          HUBSPOT_PORTAL_ID: '00000000'
+
+  # ── 3. Security Scan ──────────────────────────────────────
+  security:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detectar secrets (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - name: Verificar que .env no está commiteado
+        run: |
+          if git ls-files | grep -E '^\.env$|^\.env\.local$|^\.env\.production$'; then
+            echo "❌ Archivo .env encontrado en el repo. Elimínalo."
+            exit 1
+          fi
+          echo "✅ Sin archivos .env en el repositorio."
+
+  # ── 4. AI Code Review (solo en PRs) ──────────────────────
+  ai-review:
+    name: 🤖 AI Code Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: [lint, test]
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Obtener diff
+        id: diff
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD -- '*.ts' '*.tsx' | head -c 12000)
+          echo "diff<<EOF" >> $GITHUB_OUTPUT
+          echo "$DIFF" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Claude AI Review
+        id: review
+        run: |
+          REVIEW=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
+            -H "anthropic-version: 2023-06-01" \
+            -d '{
+              "model": "claude-sonnet-4-20250514",
+              "max_tokens": 1500,
+              "system": "Eres un Senior Code Reviewer para el proyecto Ultra-CleanGT (Next.js 14, Supabase, HubSpot). Analiza el diff. Categoriza: 🔴 Crítico (seguridad/bugs), 🟠 Importante (lógica/performance), 🟡 Sugerencia. Si todo está correcto, indícalo con ✅.",
+              "messages": [{"role":"user","content":"Revisa este diff:\n\n```diff\n'"$(echo '${{ steps.diff.outputs.diff }}' | sed "s/'/'\\\\''/g")"'\n```"}]
+            }')
+          TEXT=$(echo $REVIEW | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['content'][0]['text'])" 2>/dev/null || echo "No se pudo obtener revisión.")
+          echo "text<<EOF" >> $GITHUB_OUTPUT
+          echo "$TEXT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## 🤖 AI Code Review — Ultra-CleanGT\n\n${{ steps.review.outputs.text }}\n\n---\n*Claude Sonnet · El director humano aprueba el merge final.*`
+            })
+
+  # ── 5. Build ──────────────────────────────────────────────
+  build:
+    name: 🏗️ Build
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://oilfwbelavdvlscvmpbi.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+          NEXT_PUBLIC_APP_URL: https://www.ultra-cleangt.com
+      - run: echo "✅ Build exitoso. Vercel desplegará automáticamente."
