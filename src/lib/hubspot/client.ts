@@ -1,6 +1,7 @@
 // =============================================================================
-// HubSpot API Client — Gestión de contactos en CRM
-// Documentación: https://developers.hubspot.com/docs/api/crm/contacts
+// src/lib/hubspot/client.ts
+// HubSpot API Client — Solo propiedades estándar verificadas
+// Docs: https://developers.hubspot.com/docs/api/crm/contacts
 // =============================================================================
 
 interface HubSpotContactProps {
@@ -25,7 +26,6 @@ function getToken(): string {
   return token
 }
 
-// Divide nombre completo en nombre y apellido
 function splitName(fullName: string): { firstname: string; lastname: string } {
   const parts = fullName.trim().split(' ')
   const firstname = parts[0] || fullName
@@ -40,21 +40,24 @@ export async function createHubSpotContact(
   try {
     const { firstname, lastname } = splitName(lead.name)
 
+    // ⚠️ SOLO propiedades estándar de HubSpot Free
+    // lead_source y website NO existen como propiedades de contacto → causan 400
     const payload = {
       properties: {
-        email: lead.email,
-        firstname,
-        lastname,
-        jobtitle: lead.role,
-        company: lead.company,
-        phone: lead.whatsapp,
-        hs_lead_status: 'NEW',
+        email:          lead.email,
+        firstname:      firstname,
+        lastname:       lastname,
+        jobtitle:       lead.role,
+        company:        lead.company,
+        phone:          lead.whatsapp,
         lifecyclestage: 'lead',
-        lead_source: lead.source ?? 'web',
-        // Campo personalizado: pipeline de origen
-        website: 'ultra-cleangt.com',
+        // hs_lead_status: omitido — requiere HubSpot Sales Hub
+        // lead_source:   omitido — no es propiedad estándar de contacto
+        // website:       omitido — es propiedad de Empresa, no de Contacto
       },
     }
+
+    console.log('[HubSpot] Enviando payload:', JSON.stringify(payload))
 
     const response = await fetch(`${HUBSPOT_BASE_URL}/crm/v3/objects/contacts`, {
       method: 'POST',
@@ -65,26 +68,38 @@ export async function createHubSpotContact(
       body: JSON.stringify(payload),
     })
 
+    // Leer body UNA sola vez
+    const responseData = await response.json()
+
+    // Contacto ya existe (conflicto de email)
     if (response.status === 409) {
-      // Contacto ya existe — actualizarlo
-      const existing = await response.json()
-      const contactId = existing.message?.match(/ID: (\d+)/)?.[1]
-      if (contactId) {
-        return { id: contactId, error: null }
+      console.log('[HubSpot] Contacto ya existe, extrayendo ID...')
+      // El ID viene en el mensaje de error: "Contact already exists. Existing ID: 12345"
+      const existingId = responseData.message?.match(/Existing ID:\s*(\d+)/)?.[1]
+        ?? responseData.id
+        ?? null
+      if (existingId) {
+        console.log(`[HubSpot] ID del contacto existente: ${existingId}`)
+        return { id: String(existingId), error: null }
       }
+      return { id: null, error: 'Contacto duplicado pero no se pudo obtener ID' }
     }
 
     if (!response.ok) {
-      const errorData = await response.json()
-      console.error('[HubSpot] Error al crear contacto:', errorData)
-      return { id: null, error: `HubSpot API error: ${response.status}` }
+      console.error(`[HubSpot] Error ${response.status}:`, JSON.stringify(responseData))
+      return {
+        id: null,
+        error: `HubSpot API error ${response.status}: ${responseData.message ?? JSON.stringify(responseData)}`,
+      }
     }
 
-    const data: HubSpotApiResponse = await response.json()
+    const data = responseData as HubSpotApiResponse
+    console.log(`[HubSpot] ✅ Contacto creado con ID: ${data.id}`)
     return { id: data.id, error: null }
+
   } catch (error) {
     console.error('[HubSpot] Error de conexión:', error)
-    return { id: null, error: 'Error de conexión con HubSpot' }
+    return { id: null, error: `Error de conexión: ${String(error)}` }
   }
 }
 
@@ -107,7 +122,9 @@ export async function updateHubSpotContact(
     )
 
     if (!response.ok) {
-      return { success: false, error: `HubSpot update error: ${response.status}` }
+      const err = await response.json()
+      console.error('[HubSpot] Error al actualizar:', err)
+      return { success: false, error: `HubSpot update error ${response.status}` }
     }
 
     return { success: true, error: null }
